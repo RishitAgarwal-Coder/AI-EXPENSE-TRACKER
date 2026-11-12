@@ -31,6 +31,18 @@ public class AIAssistantController {
         geminiService.setRuntimeApiKey(key);
     }
 
+    public GeminiService.Mode getLastMode() {
+        return geminiService.getLastMode();
+    }
+
+    public String getLastModeDetail() {
+        return geminiService.getLastModeDetail();
+    }
+
+    public void clearConversation() {
+        geminiService.clearHistory();
+    }
+
     public String getFinancialContextSummary() {
         return geminiService.buildRealDatabaseFinancialContext();
     }

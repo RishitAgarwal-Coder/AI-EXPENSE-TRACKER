@@ -49,7 +49,16 @@ public class AlertHelper {
     }
 
     private static void styleDialog(Alert alert) {
-        DialogPane dialogPane = alert.getDialogPane();
+        applyTheme(alert.getDialogPane());
+    }
+
+    /** Gives any dialog the same look as the rest of the app (fonts, buttons, fields). */
+    public static void applyTheme(DialogPane dialogPane) {
         dialogPane.setStyle("-fx-font-family: 'Segoe UI', sans-serif; -fx-font-size: 13px;");
+        java.net.URL css = AlertHelper.class.getResource("/styles/style.css");
+        if (css != null && !dialogPane.getStylesheets().contains(css.toExternalForm())) {
+            dialogPane.getStylesheets().add(css.toExternalForm());
+        }
+        dialogPane.getStyleClass().add("app-dialog");
     }
 }

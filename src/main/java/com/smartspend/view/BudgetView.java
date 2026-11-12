@@ -75,12 +75,12 @@ public class BudgetView extends ScrollPane {
 
         totalBudgetLabel = new Label("$0.00");
         totalBudgetLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #4338ca;");
-        VBox bgtKpi = new VBox(2, new Label("Total Budget:"), totalBudgetLabel);
+        VBox bgtKpi = new VBox(2, kpiCaption("Total Budget:"), totalBudgetLabel);
         bgtKpi.setStyle("-fx-background-color: #ede9fe; -fx-padding: 8px 16px; -fx-background-radius: 8px;");
 
         exceededCountLabel = new Label("0");
         exceededCountLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #dc2626;");
-        VBox alertKpi = new VBox(2, new Label("Over Budget:"), exceededCountLabel);
+        VBox alertKpi = new VBox(2, kpiCaption("Over Budget:"), exceededCountLabel);
         alertKpi.setStyle("-fx-background-color: #fee2e2; -fx-padding: 8px 16px; -fx-background-radius: 8px;");
 
         header.getChildren().addAll(titleBox, spacer, bgtKpi, alertKpi);
@@ -133,6 +133,7 @@ public class BudgetView extends ScrollPane {
 
     private TableView<Budget> createTable() {
         TableView<Budget> table = new TableView<>();
+        table.setPlaceholder(emptyLabel("No budgets set for this month yet. Pick a category above to set one."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
         TableColumn<Budget, String> catCol = new TableColumn<>("Category");
@@ -275,5 +276,17 @@ public class BudgetView extends ScrollPane {
         totalBudgetLabel.setText(String.format("$%.2f", controller.getTotalBudget(activeMonth)));
         int exceeded = controller.getExceededCount(activeMonth);
         exceededCountLabel.setText(String.valueOf(exceeded));
+    }
+
+    private static Label kpiCaption(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("kpi-caption");
+        return l;
+    }
+
+    private static Label emptyLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("table-empty");
+        return l;
     }
 }

@@ -149,7 +149,8 @@ public class IncomeView extends ScrollPane {
         formCard.getChildren().addAll(formTitle, formGrid, formActions);
 
         // 3. Search & Filter Bar
-        HBox filterBar = new HBox(12);
+        // FlowPane so the filter controls wrap onto a second row instead of being cut off
+        javafx.scene.layout.FlowPane filterBar = new javafx.scene.layout.FlowPane(12, 10);
         filterBar.setAlignment(Pos.CENTER_LEFT);
         filterBar.setPadding(new Insets(12, 16, 12, 16));
         filterBar.setStyle(
@@ -198,8 +199,8 @@ public class IncomeView extends ScrollPane {
 
         filterBar.getChildren().addAll(
                 new Label("Filter:"), searchField, filterSourceBox,
-                new Label("From:"), filterStartDate,
-                new Label("To:"), filterEndDate,
+                fieldGroup("From:", filterStartDate),
+                fieldGroup("To:", filterEndDate),
                 resetFilterBtn, fSpacer, deleteBtn
         );
 
@@ -225,6 +226,7 @@ public class IncomeView extends ScrollPane {
 
     private TableView<Income> createTable() {
         TableView<Income> table = new TableView<>();
+        table.setPlaceholder(emptyLabel("No income records found. Add your first income above."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
         TableColumn<Income, String> idCol = new TableColumn<>("#");
@@ -317,5 +319,18 @@ public class IncomeView extends ScrollPane {
 
         totalMonthlyLabel.setText(String.format("$%.2f", controller.getMonthlyTotalIncome()));
         remainingBalanceLabel.setText(String.format("$%.2f", controller.getRemainingBalance()));
+    }
+
+    // Keeps a caption next to its control when the filter bar wraps
+    private static HBox fieldGroup(String caption, javafx.scene.Node control) {
+        HBox box = new HBox(8, new Label(caption), control);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    private static Label emptyLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("table-empty");
+        return l;
     }
 }

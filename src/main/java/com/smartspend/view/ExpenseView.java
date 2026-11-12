@@ -145,7 +145,8 @@ public class ExpenseView extends ScrollPane {
         formCard.getChildren().addAll(formTitle, formGrid, formActions);
 
         // 3. Search and Filter Bar
-        HBox filterBar = new HBox(12);
+        // FlowPane so the filter controls wrap onto a second row instead of being cut off
+        javafx.scene.layout.FlowPane filterBar = new javafx.scene.layout.FlowPane(12, 10);
         filterBar.setAlignment(Pos.CENTER_LEFT);
         filterBar.setPadding(new Insets(12, 16, 12, 16));
         filterBar.setStyle(
@@ -194,8 +195,8 @@ public class ExpenseView extends ScrollPane {
 
         filterBar.getChildren().addAll(
                 new Label("Filter:"), searchField, filterCategoryBox,
-                new Label("From:"), filterStartDate,
-                new Label("To:"), filterEndDate,
+                fieldGroup("From:", filterStartDate),
+                fieldGroup("To:", filterEndDate),
                 resetFilterBtn, fSpacer, deleteBtn
         );
 
@@ -222,6 +223,7 @@ public class ExpenseView extends ScrollPane {
 
     private TableView<Expense> createTable() {
         TableView<Expense> table = new TableView<>();
+        table.setPlaceholder(emptyLabel("No expenses found. Add your first expense above."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
         TableColumn<Expense, String> idCol = new TableColumn<>("#");
@@ -323,5 +325,18 @@ public class ExpenseView extends ScrollPane {
     public void loadTableData() {
         List<Expense> list = controller.loadAllExpenses();
         expenseTable.setItems(FXCollections.observableArrayList(list));
+    }
+
+    // Keeps a caption next to its control when the filter bar wraps
+    private static HBox fieldGroup(String caption, javafx.scene.Node control) {
+        HBox box = new HBox(8, new Label(caption), control);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    private static Label emptyLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("table-empty");
+        return l;
     }
 }

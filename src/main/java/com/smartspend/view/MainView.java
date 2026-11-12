@@ -78,6 +78,9 @@ public class MainView extends BorderPane {
         viewCache.put("AI Assistant", aiAssistantView);
         viewCache.put("Reports", reportsView);
 
+        // Buttons and drop-downs keep their full text instead of shrinking to "..."
+        viewCache.values().forEach(MainView::keepControlsReadable);
+
         // Default initial view
         navigateTo("Dashboard");
     }
@@ -104,7 +107,7 @@ public class MainView extends BorderPane {
 
         VBox userCard = new VBox(2);
         userCard.setPadding(new Insets(10, 12, 10, 12));
-        userCard.setStyle("-fx-background-color: #1e293b; -fx-background-radius: 8px;");
+        userCard.getStyleClass().add("sidebar-user-card");
 
         Label nameLabel = new Label("👤 " + userName);
         nameLabel.setStyle("-fx-text-fill: #f8fafc; -fx-font-weight: bold; -fx-font-size: 13px;");
@@ -147,9 +150,27 @@ public class MainView extends BorderPane {
         Button btn = new Button(labelText);
         btn.getStyleClass().add("nav-button");
         btn.setMaxWidth(Double.MAX_VALUE);
+        btn.setFocusTraversable(false);
         btn.setOnAction(e -> navigateTo(key));
         navButtons.put(key, btn);
         container.getChildren().add(btn);
+    }
+
+    private static void keepControlsReadable(Node node) {
+        if (node instanceof javafx.scene.control.TableView<?>) {
+            return;
+        }
+        if (node instanceof Button || node instanceof javafx.scene.control.ComboBox<?>) {
+            ((Region) node).setMinWidth(Region.USE_PREF_SIZE);
+        }
+        if (node instanceof Label label && !label.isWrapText() && label.getText() != null && label.getText().length() <= 20) {
+            label.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        if (node instanceof javafx.scene.control.ScrollPane sp && sp.getContent() != null) {
+            keepControlsReadable(sp.getContent());
+        } else if (node instanceof javafx.scene.Parent parent) {
+            parent.getChildrenUnmodifiable().forEach(MainView::keepControlsReadable);
+        }
     }
 
     public void navigateTo(String viewKey) {
@@ -165,8 +186,20 @@ public class MainView extends BorderPane {
         }
 
         Node view = viewCache.get(viewKey);
+        boolean changed = !viewKey.equals(currentView);
         contentArea.getChildren().setAll(view);
         currentView = viewKey;
+
+        // Soft fade + slide when switching sections
+        if (changed) {
+            view.setOpacity(0);
+            view.setTranslateY(10);
+            javafx.animation.FadeTransition fade = new javafx.animation.FadeTransition(javafx.util.Duration.millis(200), view);
+            fade.setToValue(1);
+            javafx.animation.TranslateTransition slide = new javafx.animation.TranslateTransition(javafx.util.Duration.millis(200), view);
+            slide.setToY(0);
+            new javafx.animation.ParallelTransition(fade, slide).play();
+        }
 
         // Auto-refresh views upon switching
         if (view instanceof DashboardView dv) {

@@ -3,16 +3,27 @@ package com.smartspend.service;
 import com.smartspend.model.Budget;
 import com.smartspend.model.CategorySummary;
 import com.smartspend.model.Expense;
-import com.smartspend.model.MonthlySummary;
+import com.smartspend.model.Income;
 import com.smartspend.util.DateUtil;
 import com.smartspend.util.JsonUtil;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -25,8 +36,18 @@ import java.util.concurrent.CompletableFuture;
  */
 public class GeminiService {
 
-    // Default Gemini model endpoint
-    private static final String GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=";
+    /** Result of the last answer, so the UI can show which engine replied. */
+    public enum Mode { LIVE, OFFLINE, ERROR }
+
+    // Gemini REST endpoint. Models are tried in order; retired / overloaded ones are skipped.
+    private static final String GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
+    private static final String[] GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"};
+
+    // The key typed into the in-app dialog is remembered here between launches
+    private static final Path CONFIG_FILE = Paths.get(System.getProperty("user.home"), ".smartspend", "ai.properties");
+
+    // Number of previous chat messages sent along so follow-up questions keep their context
+    private static final int MAX_HISTORY = 10;
 
     private HttpClient httpClient;
     private final ExpenseService expenseService;
@@ -34,17 +55,23 @@ public class GeminiService {
     private final BudgetService budgetService;
 
     private String runtimeApiKey;
+    private String workingModel;
+    private final List<String[]> history = new ArrayList<>();
+
+    private volatile Mode lastMode = Mode.OFFLINE;
+    private volatile String lastModeDetail = "";
 
     public GeminiService() {
         this.expenseService = new ExpenseService();
         this.incomeService = new IncomeService();
         this.budgetService = new BudgetService();
+        this.runtimeApiKey = loadSavedKey();
     }
 
     private synchronized HttpClient getHttpClient() {
         if (httpClient == null) {
             httpClient = HttpClient.newBuilder()
-                    .version(HttpClient.Version.HTTP_2)
+                    .version(HttpClient.Version.HTTP_1_1)
                     .connectTimeout(Duration.ofSeconds(10))
                     .build();
         }
@@ -53,7 +80,7 @@ public class GeminiService {
 
     /**
      * Resolves the Gemini API Key from:
-     * 1. Runtime override (if user typed it in dialog)
+     * 1. Runtime override (typed in the in-app dialog, remembered in ~/.smartspend/ai.properties)
      * 2. System Environment Variable: GEMINI_API_KEY
      * 3. Java System Property: -Dgemini.api.key
      */
@@ -72,13 +99,29 @@ public class GeminiService {
         return null;
     }
 
+    /** Sets the key for this session and remembers it for the next launch (blank clears it). */
     public void setRuntimeApiKey(String apiKey) {
-        this.runtimeApiKey = apiKey;
+        this.runtimeApiKey = (apiKey == null || apiKey.isBlank()) ? null : apiKey.trim();
+        this.workingModel = null;
+        saveKey(this.runtimeApiKey);
     }
 
     public boolean isApiKeyConfigured() {
         String key = getApiKey();
         return key != null && !key.trim().isEmpty();
+    }
+
+    public Mode getLastMode() {
+        return lastMode;
+    }
+
+    /** Short human-readable note about the last answer, e.g. the model name or why it went offline. */
+    public String getLastModeDetail() {
+        return lastModeDetail;
+    }
+
+    public synchronized void clearHistory() {
+        history.clear();
     }
 
     /**
@@ -90,100 +133,171 @@ public class GeminiService {
      */
     public CompletableFuture<String> askAiAssistantAsync(String userQuery) {
         return CompletableFuture.supplyAsync(() -> {
-            try {
-                // Step 1: Compile REAL financial data from MySQL database
-                String financialContext = buildRealDatabaseFinancialContext();
+            // Step 1: Compile REAL financial data from the database
+            String financialContext = buildRealDatabaseFinancialContext();
 
-                String apiKey = getApiKey();
-                if (apiKey == null || apiKey.isEmpty()) {
-                    // Provide intelligent offline financial analysis using real database records
-                    return "[Offline Financial Analysis - Set GEMINI_API_KEY for live AI]\n\n" +
-                           generateOfflineSmartAnalysis(userQuery, financialContext);
-                }
-
-                // Step 2: Build complete prompt for Gemini
-                String fullPrompt = "You are SmartSpend AI, an encouraging and practical financial assistant for a college student.\n" +
-                        "Below is the user's REAL, ACTUAL financial data directly from their database:\n\n" +
-                        financialContext + "\n\n" +
-                        "STUDENT'S QUESTION: " + userQuery + "\n\n" +
-                        "INSTRUCTIONS:\n" +
-                        "1. Answer strictly using their real numbers from above.\n" +
-                        "2. Keep the answer friendly, concise (2-4 short paragraphs or bullet points).\n" +
-                        "3. Highlight specific categories and amounts.\n" +
-                        "4. Give 2 actionable, realistic money-saving tips tailored to a college student.";
-
-                String requestJson = JsonUtil.buildGeminiRequest(fullPrompt);
-
-                // Step 3: Send HTTP POST request to Gemini API
-                String responseText = null;
-                try {
-                    URI uri = URI.create(GEMINI_API_URL + apiKey);
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(uri)
-                            .header("Content-Type", "application/json")
-                            .timeout(Duration.ofSeconds(20))
-                            .POST(HttpRequest.BodyPublishers.ofString(requestJson))
-                            .build();
-
-                    HttpResponse<String> response = getHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
-
-                    if (response.statusCode() == 200) {
-                        return JsonUtil.extractGeminiText(response.body());
-                    } else if (response.statusCode() == 400 || response.statusCode() == 403) {
-                        return "Gemini API Error (HTTP " + response.statusCode() + "): Invalid or unauthorized API key.\n" +
-                               "Please check your GEMINI_API_KEY environment variable.\n\n" +
-                               "Offline Analysis based on your data:\n" + generateOfflineSmartAnalysis(userQuery, financialContext);
-                    } else if (response.statusCode() == 429) {
-                        return "Gemini API rate limit reached. Please wait a moment.\n\n" +
-                               "Offline Analysis based on your data:\n" + generateOfflineSmartAnalysis(userQuery, financialContext);
-                    }
-                } catch (Throwable t) {
-                    System.err.println("[GeminiService] HttpClient notice: " + t.getMessage() + ". Trying HttpURLConnection fallback...");
-                    responseText = sendViaHttpURLConnection(GEMINI_API_URL + apiKey, requestJson, userQuery, financialContext);
-                    if (responseText != null) {
-                        return responseText;
-                    }
-                }
-
+            String apiKey = getApiKey();
+            if (apiKey == null || apiKey.isEmpty()) {
+                setMode(Mode.OFFLINE, "Offline smart analysis · add a Gemini API key for live AI");
                 return generateOfflineSmartAnalysis(userQuery, financialContext);
-
-            } catch (Exception e) {
-                System.err.println("[GeminiService] Error contacting Gemini: " + e.getMessage());
-                return "Network or Connection Notice: " + e.getMessage() + "\n\n" +
-                       "Falling back to local financial analysis:\n" +
-                       generateOfflineSmartAnalysis(userQuery, buildRealDatabaseFinancialContext());
             }
+
+            // Step 2: Build the prompt (system instruction + recent conversation + new question)
+            String systemInstruction = "You are SmartSpend AI, an encouraging and practical financial assistant for a college student.\n" +
+                    "Below is the user's REAL, ACTUAL financial data directly from their database:\n\n" +
+                    financialContext + "\n\n" +
+                    "INSTRUCTIONS:\n" +
+                    "1. Answer strictly using their real numbers from above. Never invent transactions.\n" +
+                    "2. Use the same currency symbol as the data ($).\n" +
+                    "3. Keep the answer friendly and concise (2-4 short paragraphs or bullet points).\n" +
+                    "4. Highlight specific categories and amounts.\n" +
+                    "5. When useful, give 2 actionable, realistic money-saving tips tailored to a college student.\n" +
+                    "6. If the question is not about money, answer briefly and steer back to their finances.";
+
+            List<String[]> turns;
+            synchronized (this) {
+                turns = new ArrayList<>(history);
+            }
+            turns.add(new String[]{"user", userQuery});
+            String requestJson = JsonUtil.buildGeminiChatRequest(systemInstruction, turns);
+
+            // Step 3: Send HTTP POST request to Gemini, trying the next model if one is retired
+            String problem = null;
+            List<String> models = new ArrayList<>();
+            if (workingModel != null) models.add(workingModel);
+            for (String m : GEMINI_MODELS) if (!models.contains(m)) models.add(m);
+
+            for (String model : models) {
+                int[] status = {0};
+                String body;
+                try {
+                    body = post(GEMINI_BASE_URL + model + ":generateContent", apiKey, requestJson, status);
+                } catch (Exception e) {
+                    System.err.println("[GeminiService] Network error: " + e.getMessage());
+                    problem = "No internet connection to Google Gemini";
+                    break;
+                }
+
+                if (status[0] == 200) {
+                    String answer = JsonUtil.extractGeminiText(body);
+                    workingModel = model;
+                    remember(userQuery, answer);
+                    setMode(Mode.LIVE, "Live Gemini AI · " + model);
+                    return answer;
+                }
+
+                String apiMessage = JsonUtil.extractGeminiText(body).replaceFirst("^AI Error: ", "");
+                System.err.println("[GeminiService] " + model + " -> HTTP " + status[0] + ": " + apiMessage);
+                if (status[0] == 404 || status[0] == 500 || status[0] == 503) {
+                    problem = "Gemini model unavailable (HTTP " + status[0] + ")";
+                    continue; // try the next model
+                }
+                String lowerMsg = apiMessage.toLowerCase(Locale.ROOT);
+                if (lowerMsg.contains("leaked")) {
+                    problem = "Google blocked this API key (reported as leaked). Create a new key at aistudio.google.com and click \"Set API Key\"";
+                } else if (status[0] == 400 && lowerMsg.contains("api key")) {
+                    problem = "Your Gemini API key is not valid. Click \"Set API Key\" to update it";
+                } else if (status[0] == 400 || status[0] == 403) {
+                    problem = "Gemini rejected the request: " + apiMessage;
+                } else if (status[0] == 429) {
+                    problem = "Gemini rate limit reached. Wait a minute and try again";
+                } else {
+                    problem = "Gemini error (HTTP " + status[0] + "): " + apiMessage;
+                }
+                break;
+            }
+
+            setMode(Mode.ERROR, problem == null ? "Gemini unavailable" : problem);
+            return generateOfflineSmartAnalysis(userQuery, financialContext);
         });
     }
 
-    private String sendViaHttpURLConnection(String targetUrl, String jsonBody, String userQuery, String financialContext) {
+    /** POSTs JSON to Gemini with HttpClient, falling back to HttpURLConnection. Returns the body; status[0] = HTTP code. */
+    private String post(String url, String apiKey, String json, int[] status) throws IOException {
         try {
-            java.net.URL url = java.net.URI.create(targetUrl).toURL();
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(15000);
-            conn.setDoOutput(true);
-
-            try (java.io.OutputStream os = conn.getOutputStream()) {
-                os.write(jsonBody.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            }
-
-            int code = conn.getResponseCode();
-            java.io.InputStream stream = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
-            if (stream != null) {
-                try (java.util.Scanner s = new java.util.Scanner(stream, java.nio.charset.StandardCharsets.UTF_8).useDelimiter("\\A")) {
-                    String responseBody = s.hasNext() ? s.next() : "";
-                    if (code == 200) {
-                        return JsonUtil.extractGeminiText(responseBody);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("[GeminiService] Fallback network notice: " + e.getMessage());
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", apiKey)
+                    .timeout(Duration.ofSeconds(45))
+                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .build();
+            HttpResponse<String> response = getHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+            status[0] = response.statusCode();
+            return response.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Request interrupted", e);
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[GeminiService] HttpClient notice: " + e.getMessage() + ". Trying HttpURLConnection fallback...");
+            return sendViaHttpURLConnection(url, apiKey, json, status);
         }
-        return generateOfflineSmartAnalysis(userQuery, financialContext);
+    }
+
+    private String sendViaHttpURLConnection(String targetUrl, String apiKey, String jsonBody, int[] status) throws IOException {
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create(targetUrl).toURL().openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("x-goog-api-key", apiKey);
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(45000);
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(jsonBody.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        status[0] = conn.getResponseCode();
+        InputStream stream = (status[0] >= 200 && status[0] < 300) ? conn.getInputStream() : conn.getErrorStream();
+        if (stream == null) return "";
+        try (InputStream in = stream) {
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
+    private synchronized void remember(String question, String answer) {
+        history.add(new String[]{"user", question});
+        history.add(new String[]{"model", answer});
+        while (history.size() > MAX_HISTORY) {
+            history.remove(0);
+        }
+    }
+
+    private void setMode(Mode mode, String detail) {
+        this.lastMode = mode;
+        this.lastModeDetail = detail;
+    }
+
+    private static String loadSavedKey() {
+        try {
+            if (Files.exists(CONFIG_FILE)) {
+                Properties p = new Properties();
+                try (InputStream in = Files.newInputStream(CONFIG_FILE)) {
+                    p.load(in);
+                }
+                return p.getProperty("gemini.api.key");
+            }
+        } catch (IOException e) {
+            System.err.println("[GeminiService] Could not read saved API key: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private static void saveKey(String key) {
+        try {
+            if (key == null) {
+                Files.deleteIfExists(CONFIG_FILE);
+                return;
+            }
+            Files.createDirectories(CONFIG_FILE.getParent());
+            Properties p = new Properties();
+            p.setProperty("gemini.api.key", key);
+            try (OutputStream out = Files.newOutputStream(CONFIG_FILE)) {
+                p.store(out, "SmartSpend AI settings");
+            }
+        } catch (IOException e) {
+            System.err.println("[GeminiService] Could not save API key: " + e.getMessage());
+        }
     }
 
     /**
@@ -209,9 +323,17 @@ public class GeminiService {
             sb.append("No expenses recorded for this month yet.\n");
         } else {
             for (CategorySummary cs : categories) {
-                sb.append(String.format("- %s: $%.2f (%.1f%% of total spending)%n",
-                        cs.getCategory(), cs.getTotalAmount(), cs.getPercentage()));
+                sb.append(String.format("- %s: $%.2f (%.1f%% of total spending, %d transactions)%n",
+                        cs.getCategory(), cs.getTotalAmount(), cs.getPercentage(), cs.getTransactionCount()));
             }
+        }
+
+        sb.append("\n=== INCOME BY SOURCE ===\n");
+        Map<String, Double> sources = incomeBySource(currentMonth);
+        if (sources.isEmpty()) {
+            sb.append("No income recorded for this month yet.\n");
+        } else {
+            sources.forEach((src, amt) -> sb.append(String.format("- %s: $%.2f%n", src, amt)));
         }
 
         sb.append("\n=== BUDGET STATUS ===\n");
@@ -239,11 +361,21 @@ public class GeminiService {
         return sb.toString();
     }
 
+    private Map<String, Double> incomeBySource(String yearMonth) {
+        Map<String, Double> map = new LinkedHashMap<>();
+        for (Income inc : incomeService.getAllIncome()) {
+            if (inc.getDate() != null && inc.getDate().format(DateUtil.MONTH_FORMATTER).equals(yearMonth)) {
+                map.merge(inc.getSource(), inc.getAmount(), Double::sum);
+            }
+        }
+        return map;
+    }
+
     /**
      * Smart Rule-based analysis using actual DB figures when offline or during demo evaluation.
      */
     private String generateOfflineSmartAnalysis(String query, String context) {
-        String lower = query.toLowerCase();
+        String lower = query.toLowerCase(Locale.ROOT).trim();
         String currentMonth = DateUtil.getCurrentYearMonth();
         double totalExpense = expenseService.getTotalExpenseForMonth(currentMonth);
         double totalIncome = incomeService.getTotalIncomeForMonth(currentMonth);
@@ -252,10 +384,91 @@ public class GeminiService {
 
         CategorySummary topCategory = categories.isEmpty() ? null : categories.get(0);
 
-        if (lower.contains("most") || lower.contains("highest") || lower.contains("where am i spending")) {
+        // Greeting
+        if (lower.matches("^(hi|hello|hey|hii+|namaste|good (morning|afternoon|evening))\\b.*") && lower.length() < 30) {
+            return String.format(
+                    "Hi! 👋 This month you have earned **$%.2f** and spent **$%.2f**.\n\n" +
+                    "Ask me where your money is going, how your budgets look, or for saving tips.",
+                    totalIncome, totalExpense);
+        }
+
+        // A specific expense category, e.g. "How much did I spend on food?"
+        for (String cat : Expense.CATEGORIES) {
+            if (!cat.equalsIgnoreCase("Other") && lower.contains(cat.toLowerCase(Locale.ROOT))) {
+                CategorySummary match = categories.stream()
+                        .filter(c -> c.getCategory().equalsIgnoreCase(cat)).findFirst().orElse(null);
+                Budget budget = budgetService.getBudgetsForMonth(currentMonth).stream()
+                        .filter(b -> b.getCategory().equalsIgnoreCase(cat)).findFirst().orElse(null);
+                StringBuilder sb = new StringBuilder();
+                if (match == null) {
+                    sb.append(String.format("You haven't spent anything on **%s** this month. Nice! 🎉", cat));
+                } else {
+                    sb.append(String.format(
+                            "This month you spent **$%.2f** on **%s** across %d transaction%s (%.1f%% of your total spending).",
+                            match.getTotalAmount(), cat, match.getTransactionCount(),
+                            match.getTransactionCount() == 1 ? "" : "s", match.getPercentage()));
+                }
+                if (budget != null) {
+                    sb.append(String.format("\n\n- Budget: **$%.2f**\n- %s",
+                            budget.getAmount(),
+                            budget.isExceeded()
+                                    ? String.format("Over budget by **$%.2f**. Try to pause %s spending for a while.", -budget.getRemainingAmount(), cat)
+                                    : String.format("Remaining: **$%.2f** (%.0f%% used)", budget.getRemainingAmount(), budget.getPercentageSpent())));
+                } else if (match != null) {
+                    sb.append(String.format("\n\nTip: set a monthly budget for %s in the Budgets tab to keep it in check.", cat));
+                }
+                return sb.toString();
+            }
+        }
+
+        if (lower.contains("budget") || lower.contains("limit") || lower.contains("exceed") || lower.contains("over spend")
+                || lower.contains("overspend")) {
+            List<Budget> budgets = budgetService.getBudgetsForMonth(currentMonth);
+            if (budgets.isEmpty()) {
+                return "You haven't set any budgets for this month yet. Open the **Monthly Budgets** tab to set a limit per category.";
+            }
+            StringBuilder sb = new StringBuilder("Here is your budget status for " + DateUtil.formatMonthHeader(currentMonth) + ":\n\n");
+            int exceeded = 0;
+            for (Budget b : budgets) {
+                String state = b.isExceeded() ? "⚠ EXCEEDED" : b.isNearLimit() ? "⚠ Near limit" : "✓ Safe";
+                if (b.isExceeded()) exceeded++;
+                sb.append(String.format("- **%s**: $%.2f of $%.2f (%.0f%%) %s%n",
+                        b.getCategory(), b.getSpentAmount(), b.getAmount(), b.getPercentageSpent(), state));
+            }
+            sb.append(exceeded == 0 ? "\nAll budgets are under control. Keep it up!"
+                    : String.format("%n%d budget%s exceeded. Cut back there first.", exceeded, exceeded == 1 ? " is" : "s are"));
+            return sb.toString();
+        }
+
+        if (lower.contains("income") || lower.contains("earn") || lower.contains("salary") || lower.contains("stipend")) {
+            Map<String, Double> sources = incomeBySource(currentMonth);
+            if (sources.isEmpty()) {
+                return "No income has been recorded for this month yet. Add it in the **Income** tab.";
+            }
+            StringBuilder sb = new StringBuilder(String.format("This month you earned **$%.2f**:%n%n", totalIncome));
+            sources.forEach((src, amt) -> sb.append(String.format("- %s: $%.2f%n", src, amt)));
+            sb.append(String.format("%nAfter expenses you have **$%.2f** left.", balance));
+            return sb.toString();
+        }
+
+        if (lower.contains("recent") || lower.contains("last") || lower.contains("latest") || lower.contains("transaction")) {
+            List<Expense> recent = expenseService.getRecentExpenses(5);
+            if (recent.isEmpty()) {
+                return "You have no expenses recorded yet.";
+            }
+            StringBuilder sb = new StringBuilder("Your latest expenses:\n\n");
+            for (Expense e : recent) {
+                sb.append(String.format("- %s · **%s** $%.2f (%s)%n",
+                        DateUtil.formatDisplay(e.getDate()), e.getCategory(), e.getAmount(), e.getDescription()));
+            }
+            return sb.toString();
+        }
+
+        if (lower.contains("most") || lower.contains("highest") || lower.contains("where am i spending")
+                || lower.contains("where did my money") || lower.contains("biggest")) {
             if (topCategory != null) {
                 return String.format(
-                        "Based on your actual MySQL database records for this month:\n\n" +
+                        "Based on your actual database records for this month:\n\n" +
                         "- Your highest spending category is **%s**, where you spent **$%.2f** (%.1f%% of your total expenses).\n" +
                         "- Total spending this month is **$%.2f**.\n\n" +
                         "Tip: Consider cooking at home or looking for student discounts in %s to bring this down!",
@@ -264,7 +477,8 @@ public class GeminiService {
             } else {
                 return "You haven't recorded any expenses for this month yet! Start logging your spending to see insights.";
             }
-        } else if (lower.contains("reduce") || lower.contains("saving tips") || lower.contains("save")) {
+        } else if (lower.contains("reduce") || lower.contains("tip") || lower.contains("save") || lower.contains("saving")
+                || lower.contains("cut")) {
             return String.format(
                     "Here are personalized tips based on your real spending numbers:\n\n" +
                     "1. **Audit your %s spending**: You've spent $%.2f here already. Setting a weekly cap will save you at least $%.2f by month-end.\n" +
@@ -274,7 +488,8 @@ public class GeminiService {
                     (topCategory != null ? topCategory.getTotalAmount() : 0.0),
                     (topCategory != null ? topCategory.getTotalAmount() * 0.25 : 50.0),
                     balance, totalIncome, totalIncome * 0.20);
-        } else if (lower.contains("how much") || lower.contains("spend this month") || lower.contains("summary")) {
+        } else if (lower.contains("how much") || lower.contains("spend this month") || lower.contains("summary")
+                || lower.contains("balance") || lower.contains("overview")) {
             return String.format(
                     "Here is your real financial summary for %s:\n\n" +
                     "- **Total Income**: $%.2f\n" +
@@ -293,8 +508,8 @@ public class GeminiService {
                 "- This month you earned **$%.2f** and spent **$%.2f**.\n" +
                 "- Remaining savings: **$%.2f**.\n" +
                 "- Top expense: **%s** ($%.2f).\n\n" +
-                "To connect full live conversational AI, set your GEMINI_API_KEY environment variable.\n" +
-                "You can ask me: 'Where am I spending most?', 'How can I reduce expenses?', or 'Give me saving tips'!",
+                "You can ask me: 'Where am I spending most?', 'How much did I spend on food?', " +
+                "'How are my budgets?' or 'Give me saving tips'!",
                 totalIncome, totalExpense, balance,
                 (topCategory != null ? topCategory.getCategory() : "None"),
                 (topCategory != null ? topCategory.getTotalAmount() : 0.0));
