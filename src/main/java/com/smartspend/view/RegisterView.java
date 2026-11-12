@@ -30,10 +30,11 @@ public class RegisterView extends StackPane {
     }
 
     private void initUI() {
-        setStyle("-fx-background-color: #0f172a;");
+        setStyle("-fx-background-color: linear-gradient(to bottom right, #0f172a, #1e1b4b 60%, #312e81);");
 
         VBox card = new VBox(14);
         card.setMaxWidth(440);
+        card.setMaxHeight(javafx.scene.layout.Region.USE_PREF_SIZE);
         card.setAlignment(Pos.CENTER);
         card.setPadding(new Insets(32, 40, 32, 40));
         card.setStyle(
@@ -112,6 +113,15 @@ public class RegisterView extends StackPane {
 
         card.getChildren().addAll(headerBox, formBox, registerBtn, footerBox);
         getChildren().add(card);
+
+        // Gentle entrance animation for the card
+        card.setOpacity(0);
+        card.setTranslateY(16);
+        javafx.animation.FadeTransition fade = new javafx.animation.FadeTransition(javafx.util.Duration.millis(380), card);
+        fade.setToValue(1);
+        javafx.animation.TranslateTransition slide = new javafx.animation.TranslateTransition(javafx.util.Duration.millis(380), card);
+        slide.setToY(0);
+        new javafx.animation.ParallelTransition(fade, slide).play();
         setAlignment(Pos.CENTER);
     }
 }

@@ -44,6 +44,10 @@ public class DashboardView extends ScrollPane {
     private TableView<Transaction> recentTable;
     private PieChart categoryPieChart;
     private Label emptyPieLabel;
+    private javafx.scene.layout.FlowPane pieLegend;
+
+    // Same colours as the .default-colorN.chart-pie rules in style.css
+    private static final String[] PIE_COLORS = {"#6366f1", "#a855f7", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#94a3b8"};
 
     public DashboardView(DashboardController controller, Consumer<String> navigationConsumer) {
         this.controller = controller;
@@ -143,15 +147,19 @@ public class DashboardView extends ScrollPane {
         chartTitle.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #1e1b4b;");
 
         categoryPieChart = new PieChart();
-        categoryPieChart.setLegendVisible(true);
-        categoryPieChart.setLabelsVisible(true);
-        categoryPieChart.setPrefHeight(280);
+        categoryPieChart.setLegendVisible(false);
+        categoryPieChart.setLabelsVisible(false);
+        categoryPieChart.setPrefHeight(240);
+
+        // Category legend under the pie (name + amount for every slice)
+        pieLegend = new javafx.scene.layout.FlowPane(12, 6);
+        pieLegend.setAlignment(Pos.CENTER);
 
         emptyPieLabel = new Label("No expense records found for this month.");
         emptyPieLabel.setStyle("-fx-text-fill: #94a3b8; -fx-font-style: italic;");
         emptyPieLabel.setAlignment(Pos.CENTER);
 
-        chartBox.getChildren().addAll(chartTitle, categoryPieChart, emptyPieLabel);
+        chartBox.getChildren().addAll(chartTitle, categoryPieChart, pieLegend, emptyPieLabel);
 
         contentSplit.getChildren().addAll(recentBox, chartBox);
 
@@ -177,6 +185,7 @@ public class DashboardView extends ScrollPane {
 
     private TableView<Transaction> createRecentTransactionsTable() {
         TableView<Transaction> table = new TableView<>();
+        table.setPlaceholder(emptyLabel("No transactions yet. Add an expense or income to get started."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
         // Column 1: Type
@@ -272,11 +281,30 @@ public class DashboardView extends ScrollPane {
             pieData.add(new PieChart.Data(cs.getCategory() + " ($" + (int)cs.getTotalAmount() + ")", cs.getTotalAmount()));
         }
         categoryPieChart.setData(pieData);
+        // Hover a slice to see its share of this month's spending
+        pieLegend.getChildren().clear();
+        for (int i = 0; i < pieData.size(); i++) {
+            CategorySummary cs = catSummaries.get(i);
+            javafx.scene.shape.Circle dot = new javafx.scene.shape.Circle(5, javafx.scene.paint.Color.web(PIE_COLORS[i % PIE_COLORS.length]));
+            Label item = new Label(pieData.get(i).getName(), dot);
+            item.getStyleClass().add("pie-legend-item");
+            pieLegend.getChildren().add(item);
+            javafx.scene.control.Tooltip.install(pieData.get(i).getNode(), new javafx.scene.control.Tooltip(
+                    String.format("%s: $%.2f (%.1f%%)", cs.getCategory(), cs.getTotalAmount(), cs.getPercentage())));
+        }
 
         boolean hasData = !pieData.isEmpty();
         categoryPieChart.setVisible(hasData);
         categoryPieChart.setManaged(hasData);
+        pieLegend.setVisible(hasData);
+        pieLegend.setManaged(hasData);
         emptyPieLabel.setVisible(!hasData);
         emptyPieLabel.setManaged(!hasData);
+    }
+
+    private static Label emptyLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("table-empty");
+        return l;
     }
 }

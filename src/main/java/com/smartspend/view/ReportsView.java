@@ -170,6 +170,7 @@ public class ReportsView extends ScrollPane {
 
     private TableView<CategorySummary> createCategoryTable() {
         TableView<CategorySummary> table = new TableView<>();
+        table.setPlaceholder(emptyLabel("No spending recorded for this month."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
         TableColumn<CategorySummary, String> catCol = new TableColumn<>("Category");
@@ -256,5 +257,11 @@ public class ReportsView extends ScrollPane {
         }
 
         comparisonChart.getData().addAll(incomeSeries, expenseSeries);
+    }
+
+    private static Label emptyLabel(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("table-empty");
+        return l;
     }
 }
